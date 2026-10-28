@@ -28,6 +28,9 @@
 #include "src/utility.h"
 
 namespace {
+  // route-regression-test:wire-password, matching the credentials set in SetUp.
+  constexpr auto local_basic_auth = "Basic cm91dGUtcmVncmVzc2lvbi10ZXN0OndpcmUtcGFzc3dvcmQ=";
+
   class ConfigHttpRoutes: public testing::Test {
   protected:
     std::filesystem::path directory;
@@ -35,11 +38,17 @@ namespace {
     std::thread listener;
     unsigned short bound_port = 0;
     std::string previous_username;
+    std::string previous_salt;
+    std::string previous_password;
 
     void
     SetUp() override {
       previous_username = config::sunshine.username;
+      previous_salt = config::sunshine.salt;
+      previous_password = config::sunshine.password;
       config::sunshine.username = "route-regression-test";
+      config::sunshine.salt = "route-regression-salt";
+      config::sunshine.password = util::hex(crypto::hash("wire-password" + config::sunshine.salt)).to_string();
       directory = std::filesystem::temp_directory_path() /
                   ("sunshine-confighttp-test-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
       std::filesystem::create_directories(directory);
@@ -60,6 +69,8 @@ namespace {
       }
       server.reset();
       config::sunshine.username = previous_username;
+      config::sunshine.salt = previous_salt;
+      config::sunshine.password = previous_password;
       std::error_code ignored;
       std::filesystem::remove_all(directory, ignored);
     }
@@ -172,11 +183,18 @@ TEST_F(ConfigHttpRoutes, LocaleRemainsPublicAndKeepsLegacyResponseShape) {
 
 TEST_F(ConfigHttpRoutes, LocalAuthenticatedApiKeepsItsResponseShape) {
   auto client = connect();
-  const auto response = client->request("GET", "/api/v1/file-mapping/mappings");
+  const auto response = client->request("GET", "/api/v1/file-mapping/mappings", "", { { "Authorization", local_basic_auth } });
   EXPECT_EQ(response->status_code, "200 OK");
   const auto body = nlohmann::json::parse(response->content.string());
   EXPECT_EQ(body["ok"], true);
   EXPECT_TRUE(body["mappings"].is_array());
+}
+
+TEST_F(ConfigHttpRoutes, LocalRequestsWithoutCredentialsAreRejected) {
+  auto client = connect();
+  const auto response = client->request("GET", "/api/v1/file-mapping/mappings");
+  EXPECT_EQ(response->status_code, "401 Unauthorized");
+  EXPECT_EQ(response->header.count("WWW-Authenticate"), 1);
 }
 
 TEST_F(ConfigHttpRoutes, RejectsCrossSiteBrowserApiRequests) {
@@ -355,6 +373,7 @@ TEST_F(ConfigHttpRoutes, ChunkedCoverUploadPreservesDecodedBinaryAndRejectsCross
   namespace wire = boost::beast::http;
   wire::request<wire::string_body> request { wire::verb::post, "/api/covers/upload", 11 };
   request.set(wire::field::host, "localhost");
+  request.set(wire::field::authorization, local_basic_auth);
   request.set(wire::field::content_type, "application/json");
   request.keep_alive(false);
   request.body() = body;
@@ -380,7 +399,7 @@ TEST_F(ConfigHttpRoutes, InvalidBase64CoverReturnsBadRequestWithoutCreatingAFile
     SCOPED_TRACE(data);
     const auto body = nlohmann::json { { "key", key }, { "data", data } }.dump();
     std::shared_ptr<web::Client<web::HTTPS>::Response> response;
-    ASSERT_NO_THROW(response = client->request("POST", "/api/covers/upload", body, { { "Content-Type", "application/json" } }));
+    ASSERT_NO_THROW(response = client->request("POST", "/api/covers/upload", body, { { "Content-Type", "application/json" }, { "Authorization", local_basic_auth } }));
     ASSERT_TRUE(response);
     EXPECT_EQ(response->status_code, "400 Bad Request");
     const auto json = nlohmann::json::parse(response->content.string());
@@ -417,6 +436,7 @@ TEST_F(ConfigHttpRoutes, FullLogDownloadStreamsFilesBeyondTheResponseBufferLimit
   namespace wire = boost::beast::http;
   wire::request<wire::empty_body> request { wire::verb::get, "/api/logs", 11 };
   request.set(wire::field::host, "localhost");
+  request.set(wire::field::authorization, local_basic_auth);
   request.keep_alive(false);
   wire::write(socket, request);
   boost::beast::flat_buffer buffer;

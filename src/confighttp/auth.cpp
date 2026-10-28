@@ -156,10 +156,6 @@ namespace confighttp {
       return false;
     }
 
-    if (ip_type == net::PC) {
-      return true;
-    }
-
     auto fg = util::fail_guard([&]() {
       send_unauthorized(response, request);
     });
